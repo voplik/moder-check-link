@@ -1,0 +1,21 @@
+{
+  "telegram": {
+    "botToken": "PASTE_BOT_TOKEN_FROM_BOTFATHER",
+    "chatId": "PASTE_CHAT_ID"
+  },
+  "proxy": "",
+  "intervalMinutes": 60,
+  "requestTimeoutMs": 30000,
+  "settleMs": 30000,
+  "attempts": 2,
+  "maxRedirects": 10,
+  "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+  "alertOnRecovery": true,
+  "links": [
+    {
+      "name": "ExampleCasino",
+      "url": "https://example-short.link/abc",
+      "keyword": "examplecasino"
+    }
+  ]
+}

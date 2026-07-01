@@ -1,0 +1,30 @@
+# Зависимости
+node_modules/
+
+# Секреты и рабочий конфиг (токен бота, chatId, прокси) — не коммитить!
+# В репозитории живёт только config.example.json
+config.json
+
+# Рантайм-состояние мониторинга (генерится автоматически)
+state.json
+
+# Логи
+*.log
+logs/
+npm-debug.log*
+
+# Кэш браузеров Playwright (ставится через `npx playwright install`)
+.cache/
+ms-playwright/
+
+# ОС / редакторы
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Временные файлы
+tmp/
+*.tmp
+_debug.mjs

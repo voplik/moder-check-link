@@ -1,0 +1,15 @@
+[Unit]
+Description=Мониторинг рабочих ссылок через RU IP (keyword check + Telegram alerts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/check_link
+ExecStart=/usr/bin/node /opt/check_link/index.js
+Restart=always
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target
