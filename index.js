@@ -99,6 +99,24 @@ function parseProxy(proxyUrl) {
   return out;
 }
 
+// Пред-полётная проверка прокси: реально ли он пропускает трафик и какой
+// выходной IP/страна. Запрос идёт через тот же browser (запущен с прокси).
+// Возвращает { ok, ip, country, error }.
+async function verifyProxy(cfg, browser) {
+  const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+  try {
+    // ctx.request наследует прокси контекста и отдаёт сырой ответ без рендера.
+    const res = await ctx.request.get('https://ipinfo.io/json', { timeout: cfg.requestTimeoutMs });
+    if (!res.ok()) return { ok: false, error: `HTTP ${res.status()}` };
+    const data = await res.json();
+    return { ok: true, ip: data.ip, country: data.country };
+  } catch (e) {
+    return { ok: false, error: String(e.message).split('\n')[0] };
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
+
 // Проверка одной ссылки через headless-браузер: реально исполняем JS,
 // ждём редирект (в т.ч. JS/meta и анти-РКН гейтвеи, выбирающие живое зеркало),
 // затем ищем ключевое слово в отрендеренной странице.
@@ -203,6 +221,41 @@ async function runCycle(cfg, state) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   try {
+  // Пред-полётная проверка прокси (если задан). Если прокси мёртв — пропускаем
+  // цикл целиком, иначе все ссылки ложно улетят в «заблокировано».
+  if (cfg.proxy) {
+    const pr = await verifyProxy(cfg, browser);
+    const prevP = state['__proxy__'] || { down: false };
+    if (!pr.ok) {
+      log(`⛔ Прокси не работает: ${pr.error} — цикл пропущен (иначе ложные алерты по всем ссылкам)`);
+      if (!prevP.down) {
+        await sendTelegram(
+          cfg,
+          `⛔ <b>ПРОКСИ НЕ РАБОТАЕТ</b>\n` +
+            `Ошибка: ${escapeHtml(pr.error)}\n` +
+            `Проверка ссылок пропущена, чтобы не слать ложные алерты.\n` +
+            `Время: ${now()}`
+        );
+      }
+      state['__proxy__'] = { down: true, since: prevP.since || now() };
+      await saveState(state);
+      return 0; // browser закроется в finally
+    }
+    log(`🌐 Прокси OK — выходной IP ${pr.ip} (${pr.country || '?'})`);
+    if (pr.country && pr.country !== 'RU') {
+      log(`⚠️  Страна выхода ${pr.country} ≠ RU — блокировки РКН могут быть не видны!`);
+    }
+    if (prevP.down) {
+      await sendTelegram(
+        cfg,
+        `✅ <b>ПРОКСИ ВОССТАНОВЛЕН</b>\n` +
+          `Выходной IP: ${escapeHtml(pr.ip)} (${escapeHtml(pr.country || '?')})\n` +
+          `Время: ${now()}`
+      );
+    }
+    state['__proxy__'] = { down: false, since: now() };
+  }
+
   for (const link of cfg.links) {
     // Анти-флейк: перепроверяем несколько раз перед тем как считать ссылку упавшей.
     // Тяжёлые SPA/гейтвеи иногда не успевают отрендериться или отдают «плохое» зеркало.
@@ -326,6 +379,30 @@ if (arg === '--test-telegram') {
   const ok = await sendTelegram(cfg, `🔔 Тест мониторинга ссылок. ${now()}`);
   log(ok ? 'Тестовое сообщение отправлено.' : 'Отправка не удалась (проверь токен/chatId).');
   process.exit(ok ? 0 : 1);
+} else if (arg === '--check-proxy') {
+  const cfg = await loadConfig();
+  if (!cfg.proxy) {
+    log('Прокси не задан (proxy пустой) — используется прямое соединение / RU IP сервера.');
+    process.exit(0);
+  }
+  const browser = await chromium.launch({
+    headless: true,
+    proxy: parseProxy(cfg.proxy),
+    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+  });
+  try {
+    const pr = await verifyProxy(cfg, browser);
+    if (pr.ok) {
+      log(`✅ Прокси работает — выходной IP ${pr.ip} (${pr.country || '?'})`);
+      if (pr.country && pr.country !== 'RU') log(`⚠️  Страна ${pr.country} ≠ RU — блокировки РКН могут быть не видны!`);
+      process.exitCode = 0;
+    } else {
+      log(`❌ Прокси не работает: ${pr.error}`);
+      process.exitCode = 1;
+    }
+  } finally {
+    await browser.close().catch(() => {});
+  }
 } else if (arg === '--once') {
   const cfg = await loadConfig();
   const state = await loadState();

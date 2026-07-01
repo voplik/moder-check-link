@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node index.js",
     "once": "node index.js --once",
+    "check-proxy": "node index.js --check-proxy",
     "test-telegram": "node index.js --test-telegram"
   },
   "dependencies": {
