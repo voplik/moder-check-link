@@ -7,6 +7,7 @@
 //   node index.js                 — демон: проверка сразу и далее по интервалу
 //   node index.js --once          — один прогон и выход (для теста / cron)
 //   node index.js --test-telegram — отправить тестовое сообщение в чат
+//   node index.js --check-proxy   — проверить работоспособность прокси
 //
 // Конфиг (ссылки, ключевые слова, интервал, токен, прокси) — в config.json.
 // Файл перечитывается на каждом цикле, поэтому правки применяются на лету.
@@ -198,16 +199,6 @@ function redirectCount(chain) {
   return chain && chain.length > 1 ? chain.length - 1 : 0;
 }
 
-// Маршрут редиректов для Telegram-сообщения.
-function fmtChainTg(chain) {
-  const n = redirectCount(chain);
-  if (!chain || !chain.length) {
-    return 'Редиректов: 0 (ответа от сервера нет)';
-  }
-  const lines = chain.map((h, i) => `${i + 1}. [${h.status}] ${tgLink(h.url)}`);
-  return `Редиректов: ${n}\n` + lines.join('\n');
-}
-
 async function runCycle(cfg, state) {
   log(`Старт проверки: ${cfg.links.length} ссылок${cfg.proxy ? ' (через прокси)' : ' (прямое соединение / RU IP сервера)'}`);
   let problems = 0;
@@ -231,10 +222,9 @@ async function runCycle(cfg, state) {
       if (!prevP.down) {
         await sendTelegram(
           cfg,
-          `⛔ <b>ПРОКСИ НЕ РАБОТАЕТ</b>\n` +
-            `Ошибка: ${escapeHtml(pr.error)}\n` +
-            `Проверка ссылок пропущена, чтобы не слать ложные алерты.\n` +
-            `Время: ${now()}`
+          `⛔ ПРОКСИ НЕ РАБОТАЕТ\n` +
+          `Ошибка: ${escapeHtml(pr.error)}\n` +
+          `Время: ${now()}`
         );
       }
       state['__proxy__'] = { down: true, since: prevP.since || now() };
@@ -248,9 +238,9 @@ async function runCycle(cfg, state) {
     if (prevP.down) {
       await sendTelegram(
         cfg,
-        `✅ <b>ПРОКСИ ВОССТАНОВЛЕН</b>\n` +
-          `Выходной IP: ${escapeHtml(pr.ip)} (${escapeHtml(pr.country || '?')})\n` +
-          `Время: ${now()}`
+        `✅ ПРОКСИ ВОССТАНОВЛЕН\n` +
+        `IP: ${escapeHtml(pr.ip)} (${escapeHtml(pr.country || '?')})\n` +
+        `Время: ${now()}`
       );
     }
     state['__proxy__'] = { down: false, since: now() };
@@ -276,11 +266,8 @@ async function runCycle(cfg, state) {
         await sendTelegram(
           cfg,
           `✅ <b>ВОССТАНОВЛЕНО: ${escapeHtml(link.name)}</b>\n` +
-            `Ссылка снова работает.\n` +
-            `URL: ${tgLink(link.url)}\n` +
-            `Конечный: ${tgLink(result.finalUrl)}\n` +
-            `${fmtChainTg(result.chain)}\n` +
-            `Было недоступно с: ${prev.since || '?'}`
+          `URL: ${tgLink(link.url)}\n` +
+          `Время: ${now()}`
         );
       }
       state[link.name] = { down: false, reason: result.reason, since: now() };
@@ -291,14 +278,14 @@ async function runCycle(cfg, state) {
       if (!prev.down) {
         await sendTelegram(
           cfg,
-          `🚨 <b>БЛОКИРОВКА / ПРОБЛЕМА: ${escapeHtml(link.name)}</b>\n` +
-            `Причина: ${escapeHtml(result.reason)}\n` +
-            `URL: ${tgLink(link.url)}\n` +
-            (result.finalUrl && result.finalUrl !== link.url
-              ? `Конечный редирект: ${tgLink(result.finalUrl)}\n`
-              : '') +
-            `${fmtChainTg(result.chain)}\n` +
-            `Время: ${now()}`
+          `🚨 <b>ПРОБЛЕМА: ${escapeHtml(link.name)}</b>\n` +
+          `Причина: ${escapeHtml(result.reason)}\n` +
+          `URL: ${tgLink(link.url)}\n` +
+          (result.finalUrl && result.finalUrl !== link.url
+            ? `Конечный URL: ${tgLink(result.finalUrl)}\n`
+            : '') +
+          `Редиректов: ${redirectCount(result.chain)}\n` +
+          `Время: ${now()}`
         );
         state[link.name] = { down: true, reason: result.reason, since: now() };
       } else {
