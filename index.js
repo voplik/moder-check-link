@@ -223,7 +223,7 @@ async function runCycle(cfg, state) {
         await sendTelegram(
           cfg,
           `⛔ ПРОКСИ НЕ РАБОТАЕТ\n` +
-          `Ошибка: ${escapeHtml(pr.error)}\n` +
+          `Ошибка: ${escapeHtml(pr.error)}\n\n` +
           `Время: ${now()}`
         );
       }
@@ -239,7 +239,7 @@ async function runCycle(cfg, state) {
       await sendTelegram(
         cfg,
         `✅ ПРОКСИ ВОССТАНОВЛЕН\n` +
-        `IP: ${escapeHtml(pr.ip)} (${escapeHtml(pr.country || '?')})\n` +
+        `IP: ${escapeHtml(pr.ip)} (${escapeHtml(pr.country || '?')})\n\n` +
         `Время: ${now()}`
       );
     }
@@ -266,7 +266,7 @@ async function runCycle(cfg, state) {
         await sendTelegram(
           cfg,
           `✅ <b>ВОССТАНОВЛЕНО: ${escapeHtml(link.name)}</b>\n` +
-          `URL: ${tgLink(link.url)}\n` +
+          `URL: ${tgLink(link.url)}\n\n` +
           `Время: ${now()}`
         );
       }
@@ -284,7 +284,7 @@ async function runCycle(cfg, state) {
           (result.finalUrl && result.finalUrl !== link.url
             ? `Конечный URL: ${tgLink(result.finalUrl)}\n`
             : '') +
-          `Редиректов: ${redirectCount(result.chain)}\n` +
+          `Редиректов: ${redirectCount(result.chain)}\n\n` +
           `Время: ${now()}`
         );
         state[link.name] = { down: true, reason: result.reason, since: now() };
