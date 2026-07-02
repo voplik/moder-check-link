@@ -16,6 +16,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { chromium } from 'playwright';
+import UserAgent from 'user-agents'; // Добавлено
 // Telegram шлём через встроенный в Node global fetch (прокси ему не нужен).
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -29,15 +30,39 @@ const STATE_PATH = join(__dirname, 'state.json');
 const now = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
 const log = (...a) => console.log(`[${now()}]`, ...a);
 
+// Кешируем один актуальный userAgent на сессию
+let cachedUserAgent = null;
+
+function getDefaultUserAgent() {
+  if (!cachedUserAgent) {
+    try {
+      // Генерируем десктопный Chrome-агент с актуальной версией
+      const ua = new UserAgent({
+        deviceCategory: 'desktop',
+        platform: 'Win32',
+      });
+      cachedUserAgent = ua.toString();
+    } catch (e) {
+      // fallback
+      cachedUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36';
+    }
+  }
+  return cachedUserAgent;
+}
+
 async function loadConfig() {
   const raw = await readFile(CONFIG_PATH, 'utf8');
   const cfg = JSON.parse(raw);
   cfg.intervalMinutes = Number(cfg.intervalMinutes) || 60;
   cfg.requestTimeoutMs = Number(cfg.requestTimeoutMs) || 30000;
-  cfg.settleMs = Number(cfg.settleMs) || 30000; // ожидание JS-редиректа на рабочее зеркало
-  cfg.attempts = Number(cfg.attempts) || 2; // попыток на ссылку перед алертом (анти-флейк)
+  cfg.settleMs = Number(cfg.settleMs) || 30000;
+  cfg.attempts = Number(cfg.attempts) || 2;
   cfg.maxRedirects = Number(cfg.maxRedirects) || 10;
   if (!Array.isArray(cfg.links)) cfg.links = [];
+  // Если в конфиге не задан userAgent, используем автоматический
+  if (!cfg.userAgent) {
+    cfg.userAgent = getDefaultUserAgent();
+  }
   return cfg;
 }
 
@@ -118,17 +143,39 @@ async function verifyProxy(cfg, browser) {
   }
 }
 
+// Функция для создания контекста с улучшенной маскировкой (обходит детектирование браузера)
+function createBrowserContext(browser, cfg) {
+  return browser.newContext({
+    userAgent: cfg.userAgent || getDefaultUserAgent(),
+    ignoreHTTPSErrors: true,
+    locale: 'ru-RU',
+    viewport: { width: 1280, height: 720 },
+    deviceScaleFactor: 1,
+    hasTouch: false,
+    isMobile: false,
+    extraHTTPHeaders: {
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
+      'Cache-Control': 'max-age=0',
+    },
+  });
+}
+
 // Проверка одной ссылки через headless-браузер: реально исполняем JS,
 // ждём редирект (в т.ч. JS/meta и анти-РКН гейтвеи, выбирающие живое зеркало),
 // затем ищем ключевое слово в отрендеренной странице.
 // Возвращает { ok, reason, finalUrl, chain }.
 async function checkLink(link, cfg, browser) {
   const keyword = String(link.keyword || '').toLowerCase();
-  const context = await browser.newContext({
-    userAgent: cfg.userAgent,
-    ignoreHTTPSErrors: true,
-    locale: 'ru-RU',
-  });
+  // Используем улучшенный контекст с маскировкой
+  const context = await createBrowserContext(browser, cfg);
   const page = await context.newPage();
   const chain = [];
   // Фиксируем маршрут переходов главного фрейма (URL + статус ответа)
@@ -219,7 +266,14 @@ async function runCycle(cfg, state) {
   const browser = await chromium.launch({
     headless: true,
     proxy: parseProxy(cfg.proxy),
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    args: [
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled', // маскировка автоматизации
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--disable-gpu',
+      '--disable-web-security', // может помочь, но осторожно
+    ],
   });
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -382,7 +436,7 @@ if (arg === '--test-telegram') {
   const browser = await chromium.launch({
     headless: true,
     proxy: parseProxy(cfg.proxy),
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
   });
   try {
     const pr = await verifyProxy(cfg, browser);

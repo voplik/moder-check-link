@@ -28,3 +28,5 @@ Thumbs.db
 tmp/
 *.tmp
 _debug.mjs
+
+package-lock.json

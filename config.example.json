@@ -5,11 +5,10 @@
   },
   "proxy": "",
   "intervalMinutes": 60,
-  "requestTimeoutMs": 30000,
-  "settleMs": 30000,
+  "requestTimeoutMs": 60000,
+  "settleMs": 60000,
   "attempts": 2,
-  "maxRedirects": 10,
-  "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+  "maxRedirects": 50,
   "alertOnRecovery": true,
   "links": [
     {
