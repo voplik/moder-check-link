@@ -106,11 +106,11 @@ function parseProxy(proxyUrl) {
 async function verifyProxy(cfg, browser) {
   const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
   try {
-    // ctx.request наследует прокси контекста и отдаёт сырой ответ без рендера.
-    const res = await ctx.request.get('https://ipinfo.io/json', { timeout: cfg.requestTimeoutMs });
+    // Используем ip-api.com — он показал корректную страну для вашего IP
+    const res = await ctx.request.get('http://ip-api.com/json', { timeout: cfg.requestTimeoutMs });
     if (!res.ok()) return { ok: false, error: `HTTP ${res.status()}` };
     const data = await res.json();
-    return { ok: true, ip: data.ip, country: data.country };
+    return { ok: true, ip: data.query, country: data.countryCode };
   } catch (e) {
     return { ok: false, error: String(e.message).split('\n')[0] };
   } finally {
@@ -131,7 +131,7 @@ async function checkLink(link, cfg, browser) {
   });
   const page = await context.newPage();
   const chain = [];
-  // Фиксируем маршрут переходов главного фрейма (URL + статус ответа).
+  // Фиксируем маршрут переходов главного фрейма (URL + статус ответа)
   page.on('response', (res) => {
     try {
       const req = res.request();
@@ -145,6 +145,20 @@ async function checkLink(link, cfg, browser) {
     const startHost = new URL(link.url).host;
     await page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: cfg.requestTimeoutMs });
 
+    // Проверяем статус последнего ответа в цепочке
+    if (chain.length > 0) {
+      const last = chain[chain.length - 1];
+      if (last.status === 403) {
+        return {
+          ok: false,
+          reason: 'HTTP 403 Forbidden (доступ запрещён)',
+          finalUrl: page.url(),
+          chain,
+        };
+      }
+      // Можно добавить обработку других статусов, если нужно
+    }
+
     if (!keyword) {
       // ключевого слова нет — просто дождёмся возможного редиректа на зеркало
       await page
@@ -154,8 +168,7 @@ async function checkLink(link, cfg, browser) {
       return { ok: true, reason: 'ключевое слово не задано — проверен только доступ', finalUrl: page.url(), chain };
     }
 
-    // Ждём появления ключевого слова в DOM (после JS-редиректа и рендера SPA).
-    // Резолвится сразу, как слово появилось; переживает смену страницы/зеркала.
+    // Ждём появления ключевого слова в DOM (после JS-редиректа и рендера SPA)
     const found = await page
       .waitForFunction(
         (kw) => document.documentElement.innerHTML.toLowerCase().includes(kw),
@@ -212,8 +225,7 @@ async function runCycle(cfg, state) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   try {
-  // Пред-полётная проверка прокси (если задан). Если прокси мёртв — пропускаем
-  // цикл целиком, иначе все ссылки ложно улетят в «заблокировано».
+  // Пред-полётная проверка прокси (если задан)
   if (cfg.proxy) {
     const pr = await verifyProxy(cfg, browser);
     const prevP = state['__proxy__'] || { down: false };
@@ -229,7 +241,7 @@ async function runCycle(cfg, state) {
       }
       state['__proxy__'] = { down: true, since: prevP.since || now() };
       await saveState(state);
-      return 0; // browser закроется в finally
+      return 0;
     }
     log(`🌐 Прокси OK — выходной IP ${pr.ip} (${pr.country || '?'})`);
     if (pr.country && pr.country !== 'RU') {
@@ -247,8 +259,7 @@ async function runCycle(cfg, state) {
   }
 
   for (const link of cfg.links) {
-    // Анти-флейк: перепроверяем несколько раз перед тем как считать ссылку упавшей.
-    // Тяжёлые SPA/гейтвеи иногда не успевают отрендериться или отдают «плохое» зеркало.
+    // Анти-флейк: перепроверяем несколько раз перед тем как считать ссылку упавшей
     let result;
     for (let attempt = 1; attempt <= cfg.attempts; attempt++) {
       result = await checkLink(link, cfg, browser);
@@ -274,7 +285,6 @@ async function runCycle(cfg, state) {
     } else {
       problems++;
       log(`❌ ${link.name}: ПРОБЛЕМА — ${result.reason} [редиректов: ${redirectCount(result.chain)}]`);
-      // Алерт только при переходе OK → DOWN (чтобы не спамить каждый час).
       if (!prev.down) {
         await sendTelegram(
           cfg,
@@ -289,7 +299,6 @@ async function runCycle(cfg, state) {
         );
         state[link.name] = { down: true, reason: result.reason, since: now() };
       } else {
-        // всё ещё лежит — не дублируем алерт, только обновляем причину
         state[link.name] = { down: true, reason: result.reason, since: prev.since };
       }
     }
@@ -310,18 +319,16 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Экранирование для значения HTML-атрибута (href).
 function escapeAttr(s) {
   return escapeHtml(s).replace(/"/g, '&quot;');
 }
 
-// Кликабельная ссылка для Telegram (parse_mode: HTML).
 function tgLink(url, text = 'ссылка') {
   return `<a href="${escapeAttr(url)}">${escapeHtml(text)}</a>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Планировщик (динамический интервал из конфига)
+// Планировщик
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function daemon() {
@@ -329,7 +336,7 @@ async function daemon() {
   const tick = async () => {
     let cfg;
     try {
-      cfg = await loadConfig(); // перечитываем — правки конфига применяются на лету
+      cfg = await loadConfig();
     } catch (e) {
       log('⚠️  Ошибка чтения config.json:', e.message);
       timer = setTimeout(tick, 60_000);
