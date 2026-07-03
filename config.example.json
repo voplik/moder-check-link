@@ -16,6 +16,12 @@
       "name": "ExampleCasino",
       "url": "https://example-short.link/abc",
       "keyword": "examplecasino"
+    },
+    {
+      "name": "OnlyStatus",
+      "url": "https://example.com/page",
+      "checkKeyword": false,
+      "validStatuses": [200, 403]
     }
   ]
 }

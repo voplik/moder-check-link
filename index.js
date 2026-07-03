@@ -16,6 +16,12 @@
 //
 // Конфиг (ссылки, ключевые слова, интервал, токен, прокси) — в config.json.
 // Файл перечитывается на каждом цикле, поэтому правки применяются на лету.
+//
+// Опции на уровне ссылки (в объекте links[]):
+//   keyword        — искомое слово на конечной странице
+//   checkKeyword   — false: не проверять ключевое слово (только доступ/статус)
+//   validStatuses  — массив допустимых HTTP-статусов, напр. [200, 403];
+//                    итоговый статус обязан входить в него, иначе — проблема
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -194,6 +200,15 @@ function createBrowserContext(browser, cfg) {
 // Возвращает { ok, reason, finalUrl, chain }.
 async function checkLink(link, cfg, browser) {
   const keyword = String(link.keyword || '').toLowerCase();
+  // Проверять ли ключевое слово: по умолчанию да, если оно задано.
+  // Отключается на уровне ссылки полем "checkKeyword": false.
+  const checkKeyword = link.checkKeyword !== false && keyword.length > 0;
+  // Список допустимых HTTP-статусов, напр. [200, 403]. Если задан — итоговый
+  // статус обязан входить в него. Если не задан — старое поведение (403 = бан).
+  const validStatuses = Array.isArray(link.validStatuses)
+    ? link.validStatuses.map(Number).filter((n) => Number.isFinite(n))
+    : null;
+
   // Используем улучшенный контекст с маскировкой
   const context = await createBrowserContext(browser, cfg);
   const page = await context.newPage();
@@ -212,40 +227,47 @@ async function checkLink(link, cfg, browser) {
     const startHost = new URL(link.url).host;
     await page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: cfg.requestTimeoutMs });
 
-    // Проверяем статус последнего ответа в цепочке
-    if (chain.length > 0) {
-      const last = chain[chain.length - 1];
-      if (last.status === 403) {
-        return {
-          ok: false,
-          reason: 'HTTP 403 Forbidden (доступ запрещён)',
-          finalUrl: page.url(),
-          chain,
-        };
-      }
-      // Можно добавить обработку других статусов, если нужно
-    }
-
-    if (!keyword) {
-      // ключевого слова нет — просто дождёмся возможного редиректа на зеркало
+    // Ждём отработки редиректа/рендера. При проверке ключевого слова это же
+    // ожидание ищет слово в DOM (переживает JS-редирект на живое зеркало).
+    let found = null;
+    if (checkKeyword) {
+      found = await page
+        .waitForFunction(
+          (kw) => document.documentElement.innerHTML.toLowerCase().includes(kw),
+          keyword,
+          { timeout: cfg.settleMs, polling: 1000 }
+        )
+        .then(() => true)
+        .catch(() => false);
+    } else {
       await page
         .waitForFunction((h) => location.host !== h, startHost, { timeout: cfg.settleMs })
         .catch(() => {});
       await page.waitForLoadState('load', { timeout: cfg.requestTimeoutMs }).catch(() => {});
-      return { ok: true, reason: 'ключевое слово не задано — проверен только доступ', finalUrl: page.url(), chain };
     }
 
-    // Ждём появления ключевого слова в DOM (после JS-редиректа и рендера SPA)
-    const found = await page
-      .waitForFunction(
-        (kw) => document.documentElement.innerHTML.toLowerCase().includes(kw),
-        keyword,
-        { timeout: cfg.settleMs, polling: 1000 }
-      )
-      .then(() => true)
-      .catch(() => false);
-
     const finalUrl = page.url();
+    const lastStatus = chain.length ? chain[chain.length - 1].status : null;
+
+    // 1) Проверка HTTP-статуса по итоговому состоянию.
+    if (validStatuses) {
+      if (lastStatus != null && !validStatuses.includes(lastStatus)) {
+        return {
+          ok: false,
+          reason: `HTTP ${lastStatus} не входит в допустимые [${validStatuses.join(', ')}]`,
+          finalUrl,
+          chain,
+        };
+      }
+    } else if (lastStatus === 403) {
+      return { ok: false, reason: 'HTTP 403 Forbidden (доступ запрещён)', finalUrl, chain };
+    }
+
+    // 2) Проверка ключевого слова (если не отключена).
+    if (!checkKeyword) {
+      const st = lastStatus != null ? `HTTP ${lastStatus}` : 'доступ есть';
+      return { ok: true, reason: `${st} — без проверки ключевого слова`, finalUrl, chain };
+    }
     if (found) {
       return { ok: true, reason: `найдено «${keyword}»`, finalUrl, chain };
     }
