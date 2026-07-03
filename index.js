@@ -8,6 +8,11 @@
 //   node index.js --once          — один прогон и выход (для теста / cron)
 //   node index.js --test-telegram — отправить тестовое сообщение в чат
 //   node index.js --check-proxy   — проверить работоспособность прокси
+//   node index.js --report        — отправить ежедневную сводку прямо сейчас (тест)
+//
+// Раз в сутки (по умолчанию 18:00 МСК, настраивается reportHourMsk в config.json)
+// демон шлёт в Telegram сводку по каждой ссылке и прокси: статус + время
+// последней проверки.
 //
 // Конфиг (ссылки, ключевые слова, интервал, токен, прокси) — в config.json.
 // Файл перечитывается на каждом цикле, поэтому правки применяются на лету.
@@ -50,10 +55,25 @@ function getDefaultUserAgent() {
   return cachedUserAgent;
 }
 
+// Метки времени в state пишутся через toISOString() → это UTC. Для отчёта
+// переводим в МСК (UTC+3, без перехода на летнее время).
+const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
+function nowMsk() {
+  return new Date(Date.now() + MSK_OFFSET_MS).toISOString().replace('T', ' ').slice(0, 19) + ' МСК';
+}
+// Строку "YYYY-MM-DD HH:MM:SS" (UTC) → та же строка в МСК с пометкой.
+function toMsk(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts.replace(' ', 'T') + 'Z');
+  if (isNaN(d.getTime())) return ts;
+  return new Date(d.getTime() + MSK_OFFSET_MS).toISOString().replace('T', ' ').slice(0, 19) + ' МСК';
+}
+
 async function loadConfig() {
   const raw = await readFile(CONFIG_PATH, 'utf8');
   const cfg = JSON.parse(raw);
   cfg.intervalMinutes = Number(cfg.intervalMinutes) || 60;
+  cfg.reportHourMsk = Number.isFinite(Number(cfg.reportHourMsk)) ? Number(cfg.reportHourMsk) : 18;
   cfg.requestTimeoutMs = Number(cfg.requestTimeoutMs) || 30000;
   cfg.settleMs = Number(cfg.settleMs) || 30000;
   cfg.attempts = Number(cfg.attempts) || 2;
@@ -292,7 +312,7 @@ async function runCycle(cfg, state) {
           `Ошибка: ${escapeHtml(pr.error)}`
         );
       }
-      state['__proxy__'] = { down: true, since: prevP.since || now() };
+      state['__proxy__'] = { down: true, since: prevP.since || now(), lastCheck: now(), error: pr.error };
       await saveState(state);
       return 0;
     }
@@ -307,7 +327,7 @@ async function runCycle(cfg, state) {
         `IP: ${escapeHtml(pr.ip)} (${escapeHtml(pr.country || '?')})`
       );
     }
-    state['__proxy__'] = { down: false, since: now() };
+    state['__proxy__'] = { down: false, since: prevP.down ? now() : (prevP.since || now()), lastCheck: now(), ip: pr.ip, country: pr.country };
   }
 
   for (const link of cfg.links) {
@@ -332,7 +352,7 @@ async function runCycle(cfg, state) {
           `URL: ${tgLink(link.url)}` 
         );
       }
-      state[link.name] = { down: false, reason: result.reason, since: now() };
+      state[link.name] = { down: false, reason: result.reason, since: prev.down ? now() : (prev.since || now()), lastCheck: now(), url: link.url };
     } else {
       problems++;
       log(`❌ ${link.name}: ПРОБЛЕМА — ${result.reason} [редиректов: ${redirectCount(result.chain)}]`);
@@ -347,9 +367,10 @@ async function runCycle(cfg, state) {
             : '') +
           `Редиректов: ${redirectCount(result.chain)}`
         );
-        state[link.name] = { down: true, reason: result.reason, since: now() };
+        state[link.name] = { down: true, reason: result.reason, since: now(), lastCheck: now(), url: link.url };
       } else {
-        state[link.name] = { down: true, reason: result.reason, since: prev.since };
+        // всё ещё лежит — не дублируем алерт, только обновляем причину
+        state[link.name] = { down: true, reason: result.reason, since: prev.since, lastCheck: now(), url: link.url };
       }
     }
     if (result.chain && result.chain.length > 1) {
@@ -378,7 +399,79 @@ function tgLink(url, text = 'ссылка') {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Планировщик
+// Ежедневный отчёт по всем ссылкам и прокси (по умолчанию 18:00 МСК)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Сколько миллисекунд до ближайшего наступления hour:00 по МСК (UTC+3).
+function msUntilNextMskHour(hour) {
+  const nowMs = Date.now();
+  const target = new Date(nowMs);
+  target.setUTCHours(hour - 3, 0, 0, 0); // hour по МСК = (hour-3) по UTC
+  if (target.getTime() <= nowMs) target.setUTCDate(target.getUTCDate() + 1);
+  return target.getTime() - nowMs;
+}
+
+// Текст ежедневной сводки: статус, причина и время последней проверки
+// по каждой ссылке и по прокси.
+function buildDailyReport(cfg, state) {
+  const lines = [`📊 <b>Ежедневная статистика</b>`, `Отчёт: ${nowMsk()}`, ''];
+
+  if (cfg.proxy) {
+    const p = state['__proxy__'] || {};
+    const st = p.down ? '⛔ не работает' : '🌐 работает';
+    const extra = p.down
+      ? (p.error ? ` (${escapeHtml(p.error)})` : '')
+      : (p.ip ? ` — IP ${escapeHtml(p.ip)} (${escapeHtml(p.country || '?')})` : '');
+    lines.push(`<b>Прокси:</b> ${st}${extra}`);
+    lines.push(`  Последняя проверка: ${toMsk(p.lastCheck)}`);
+    lines.push('');
+  }
+
+  lines.push(`<b>Ссылки (${cfg.links.length}):</b>`);
+  for (const link of cfg.links) {
+    const s = state[link.name];
+    if (!s) {
+      lines.push(`❔ ${escapeHtml(link.name)} — ещё не проверялась`);
+      continue;
+    }
+    const st = s.down ? '❌ не работает' : '✅ работает';
+    lines.push(`${st} <b>${escapeHtml(link.name)}</b>`);
+    if (s.reason) lines.push(`  ${escapeHtml(s.reason)}`);
+    lines.push(`  Последняя проверка: ${toMsk(s.lastCheck || s.since)}`);
+  }
+
+  return lines.join('\n');
+}
+
+async function sendDailyReport(cfg, state) {
+  const ok = await sendTelegram(cfg, buildDailyReport(cfg, state));
+  log(ok ? '📊 Ежедневный отчёт отправлен.' : '⚠️  Не удалось отправить ежедневный отчёт.');
+  return ok;
+}
+
+// Самопланирующийся таймер: шлёт отчёт каждый день в reportHourMsk:00 по МСК.
+function scheduleDailyReport() {
+  const schedule = async () => {
+    const cfgPeek = await loadConfig().catch(() => ({}));
+    const hour = Number.isFinite(Number(cfgPeek.reportHourMsk)) ? Number(cfgPeek.reportHourMsk) : 18;
+    const wait = msUntilNextMskHour(hour);
+    log(`Следующий ежедневный отчёт через ${Math.round(wait / 60000)} мин (в ${hour}:00 МСК).`);
+    setTimeout(async () => {
+      try {
+        const cfg = await loadConfig();
+        const state = await loadState();
+        await sendDailyReport(cfg, state);
+      } catch (e) {
+        log('⚠️  Ошибка при отправке ежедневного отчёта:', e.message);
+      }
+      schedule(); // запланировать следующий день
+    }, wait);
+  };
+  schedule();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Планировщик (динамический интервал из конфига)
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function daemon() {
@@ -409,6 +502,7 @@ async function daemon() {
     process.exit(0);
   });
 
+  scheduleDailyReport(); // ежедневная сводка в reportHourMsk:00 МСК (по умолчанию 18:00)
   await tick();
 }
 
@@ -447,6 +541,11 @@ if (arg === '--test-telegram') {
   } finally {
     await browser.close().catch(() => {});
   }
+} else if (arg === '--report') {
+  const cfg = await loadConfig();
+  const state = await loadState();
+  const ok = await sendDailyReport(cfg, state);
+  process.exit(ok ? 0 : 1);
 } else if (arg === '--once') {
   const cfg = await loadConfig();
   const state = await loadState();
