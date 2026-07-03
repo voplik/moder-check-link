@@ -469,9 +469,13 @@ async function captureLinkScreenshot(link, cfg, browser) {
         .waitForFunction((h) => location.host !== h, startHost, { timeout: cfg.settleMs })
         .catch(() => {});
     }
+    // Даём странице реально дорисоваться, иначе снимок выходит без CSS.
     await page.waitForLoadState('load', { timeout: cfg.requestTimeoutMs }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: cfg.requestTimeoutMs }).catch(() => {}); // дождаться подгрузки стилей/шрифтов
+    await page.evaluate(() => document.fonts && document.fonts.ready).catch(() => {}); // шрифты применены
+    await sleep(2000); // финальная пауза на анимации/ленивую отрисовку
 
-    const buf = await page.screenshot({ type: 'jpeg', quality: 70 }); // видимая область (1280×720)
+    const buf = await page.screenshot({ type: 'jpeg', quality: 70, animations: 'disabled' }); // видимая область (1280×720)
     return { ok: true, buf, finalUrl: page.url() };
   } catch (e) {
     // даже при ошибке попробуем снять то, что успело отрисоваться
