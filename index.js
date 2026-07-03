@@ -411,33 +411,32 @@ function msUntilNextMskHour(hour) {
   return target.getTime() - nowMs;
 }
 
-// Текст ежедневной сводки: статус, причина и время последней проверки
-// по каждой ссылке и по прокси.
+// Короткое время в МСК: "DD.MM HH:MM".
+function shortMsk(ts) {
+  if (!ts) return '—';
+  const d = ts === true ? new Date(Date.now() + MSK_OFFSET_MS)
+    : new Date(new Date(ts.replace(' ', 'T') + 'Z').getTime() + MSK_OFFSET_MS);
+  if (isNaN(d.getTime())) return '—';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getUTCDate())}.${p(d.getUTCMonth() + 1)} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
+// Компактная сводка: одна строка на ссылку, время проверки — в шапке.
 function buildDailyReport(cfg, state) {
-  const lines = [`📊 <b>Ежедневная статистика</b>`, `Отчёт: ${nowMsk()}`, ''];
+  const lines = [`📊 <b>Статистика</b> · ${shortMsk(true)} МСК`, ''];
 
-  if (cfg.proxy) {
-    const p = state['__proxy__'] || {};
-    const st = p.down ? '⛔ не работает' : '🌐 работает';
-    const extra = p.down
-      ? (p.error ? ` (${escapeHtml(p.error)})` : '')
-      : (p.ip ? ` — IP ${escapeHtml(p.ip)} (${escapeHtml(p.country || '?')})` : '');
-    lines.push(`<b>Прокси:</b> ${st}${extra}`);
-    lines.push(`  Последняя проверка: ${toMsk(p.lastCheck)}`);
-    lines.push('');
-  }
-
-  lines.push(`<b>Ссылки (${cfg.links.length}):</b>`);
   for (const link of cfg.links) {
     const s = state[link.name];
     if (!s) {
-      lines.push(`❔ ${escapeHtml(link.name)} — ещё не проверялась`);
-      continue;
+      lines.push(`⚪️ ${escapeHtml(link.name)}`);
+    } else {
+      lines.push(`${s.down ? '❌' : '✅'} ${escapeHtml(link.name)}`);
     }
-    const st = s.down ? '❌ не работает' : '✅ работает';
-    lines.push(`${st} <b>${escapeHtml(link.name)}</b>`);
-    if (s.reason) lines.push(`  ${escapeHtml(s.reason)}`);
-    lines.push(`  Последняя проверка: ${toMsk(s.lastCheck || s.since)}`);
+  }
+
+  if (cfg.proxy) {
+    const p = state['__proxy__'] || {};
+    lines.push('', `🌐 Прокси: ${p.down ? '❌ не работает' : '✅ работает'}`);
   }
 
   return lines.join('\n');
