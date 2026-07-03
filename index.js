@@ -12,8 +12,9 @@
 //
 // Раз в сутки (по умолчанию 18:00 МСК, настраивается reportHourMsk в config.json)
 // демон шлёт в Telegram сводку по каждой ссылке и прокси: статус + время
-// последней проверки. Ту же сводку можно запросить в чате командой /status,
-// а скриншоты конечных страниц всех ссылок — командой /screenshots.
+// последней проверки. Ту же сводку со скриншотами конечных страниц можно
+// запросить в чате командой /status. Алерты о проблеме/восстановлении тоже
+// содержат скриншот (если снять не удалось — уходит только текст).
 //
 // Конфиг (ссылки, ключевые слова, интервал, токен, прокси) — в config.json.
 // Файл перечитывается на каждом цикле, поэтому правки применяются на лету.
@@ -195,6 +196,53 @@ async function sendTelegramPhoto(cfg, buffer, caption) {
     }
   }
   log(`⛔ Не удалось отправить фото в Telegram за ${attempts} попыток.`);
+  return false;
+}
+
+// Отправка альбома фото (media group) с теми же ретраями.
+// items: [{ buf, caption? }], до 10 штук.
+async function sendTelegramMediaGroup(cfg, items) {
+  const { botToken, chatId } = cfg.telegram || {};
+  if (!botToken || botToken.startsWith('PASTE') || !chatId || String(chatId).startsWith('PASTE')) {
+    log('⚠️  Telegram не настроен — альбом не отправлен.');
+    return false;
+  }
+  const batch = items.slice(0, 10); // лимит Telegram на media group
+  const url = `https://api.telegram.org/bot${botToken}/sendMediaGroup`;
+  const attempts = TELEGRAM_RETRY_DELAYS.length + 1;
+
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      // Тело потока одноразовое — собираем FormData на каждой попытке.
+      const form = new FormData();
+      form.append('chat_id', String(chatId));
+      const media = batch.map((it, idx) => {
+        const field = `photo${idx}`;
+        form.append(field, new Blob([it.buf], { type: 'image/jpeg' }), `${field}.jpg`);
+        const m = { type: 'photo', media: `attach://${field}` };
+        if (it.caption) { m.caption = String(it.caption).slice(0, 1024); m.parse_mode = 'HTML'; }
+        return m;
+      });
+      form.append('media', JSON.stringify(media));
+
+      const res = await fetch(url, { method: 'POST', body: form, signal: AbortSignal.timeout(60_000) });
+      if (res.ok) return true;
+
+      const body = await res.text().catch(() => '');
+      const retriable = res.status === 429 || res.status >= 500;
+      log(`⚠️  Telegram sendMediaGroup ${res.status}${retriable ? '' : ' (не повторяем)'}: ${body}`);
+      if (!retriable) return false;
+    } catch (e) {
+      log(`⚠️  Не удалось отправить альбом (попытка ${i}/${attempts}): ${e.message}`);
+    }
+
+    if (i < attempts) {
+      const delay = TELEGRAM_RETRY_DELAYS[i - 1];
+      log(`↻ Повтор отправки альбома через ${Math.round(delay / 1000)}с...`);
+      await sleep(delay);
+    }
+  }
+  log(`⛔ Не удалось отправить альбом в Telegram за ${attempts} попыток.`);
   return false;
 }
 
@@ -403,27 +451,50 @@ async function captureLinkScreenshot(link, cfg, browser) {
   }
 }
 
-// Снять и отправить скриншоты всех ссылок в чат.
-async function sendAllScreenshots(cfg) {
-  const links = cfg.links || [];
-  if (!links.length) {
-    await sendTelegram(cfg, 'Нет ссылок для скриншотов.');
-    return;
+// Отправка одного алерта со скриншотом ссылки. Скриншот не критичен:
+// если снять не удалось — отправляем то же сообщение обычным текстом.
+async function sendAlertWithScreenshot(cfg, browser, link, text) {
+  let buf = null;
+  try {
+    const r = await captureLinkScreenshot(link, cfg, browser);
+    if (r.ok && r.buf) buf = r.buf;
+  } catch (e) {
+    log(`⚠️  Скриншот для «${link.name}» не удался: ${String(e.message).split('\n')[0]}`);
   }
-  await sendTelegram(cfg, `📷 Делаю скриншоты (${links.length})…`);
+  if (buf) {
+    const ok = await sendTelegramPhoto(cfg, buf, text);
+    if (ok) return true;
+    log('⚠️  Фото не ушло — отправляю алерт текстом.');
+  }
+  return sendTelegram(cfg, text); // фолбэк: сообщение уходит в любом случае
+}
+
+// /status: статистика + альбом скриншотов конечных страниц.
+// Текст статистики уходит всегда, даже если ни один скриншот не снялся.
+async function sendStatusWithScreenshots(cfg) {
+  const state = await loadState();
+  await sendTelegram(cfg, buildDailyReport(cfg, state)); // текст — всегда
+
+  const links = cfg.links || [];
+  if (!links.length) return;
+
   const browser = await launchBrowser(cfg);
+  const media = [];
   try {
     for (const link of links) {
-      const r = await captureLinkScreenshot(link, cfg, browser);
-      if (r.ok && r.buf) {
-        await sendTelegramPhoto(cfg, r.buf, `📷 ${tgLink(r.finalUrl, link.name)}`);
-      } else {
-        await sendTelegram(cfg, `⚠️ ${tgLink(link.url, link.name)} — скриншот не удался: ${escapeHtml(r.error || 'неизвестно')}`);
+      try {
+        const r = await captureLinkScreenshot(link, cfg, browser);
+        if (r.ok && r.buf) media.push({ caption: tgLink(r.finalUrl, link.name), buf: r.buf });
+      } catch (e) {
+        log(`⚠️  Скриншот для «${link.name}» не удался: ${String(e.message).split('\n')[0]}`);
       }
     }
   } finally {
     await browser.close().catch(() => {});
   }
+
+  if (media.length) await sendTelegramMediaGroup(cfg, media);
+  else log('⚠️  Ни один скриншот не снялся — отправлен только текст статистики.');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -494,10 +565,10 @@ async function runCycle(cfg, state) {
     if (result.ok) {
       log(`✅ ${link.name}: OK — ${result.reason} [редиректов: ${redirectCount(result.chain)}]`);
       if (prev.down && cfg.alertOnRecovery) {
-        await sendTelegram(
-          cfg,
+        await sendAlertWithScreenshot(
+          cfg, browser, link,
           `✅ <b>ВОССТАНОВЛЕНО: ${escapeHtml(link.name)}</b>\n` +
-          `URL: ${tgLink(link.url)}` 
+          `URL: ${tgLink(link.url)}`
         );
       }
       state[link.name] = { down: false, reason: result.reason, since: prev.down ? now() : (prev.since || now()), lastCheck: now(), url: link.url };
@@ -505,8 +576,8 @@ async function runCycle(cfg, state) {
       problems++;
       log(`❌ ${link.name}: ПРОБЛЕМА — ${result.reason} [редиректов: ${redirectCount(result.chain)}]`);
       if (!prev.down) {
-        await sendTelegram(
-          cfg,
+        await sendAlertWithScreenshot(
+          cfg, browser, link,
           `🚨 <b>ПРОБЛЕМА: ${escapeHtml(link.name)}</b>\n` +
           `Причина: ${escapeHtml(result.reason)}\n` +
           `URL: ${tgLink(link.url)}\n` +
@@ -622,7 +693,7 @@ function scheduleDailyReport() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Приём команд из чата: /status — статистика, /screenshots — скриншоты
+// Приём команд из чата: /status — статистика со скриншотами
 // (long polling через getUpdates; отвечаем только в настроенный chatId)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -658,7 +729,7 @@ async function pollTelegramCommands() {
     if (init.ok && init.result.length) offset = init.result[init.result.length - 1].update_id + 1;
   } catch {}
 
-  log('🤖 Слушаю команды в чате (/status, /screenshots).');
+  log('🤖 Слушаю команды в чате (/status).');
 
   const loop = async () => {
     let cfgNow;
@@ -681,13 +752,9 @@ async function pollTelegramCommands() {
           if (chatId && from !== chatId) continue; // отвечаем только в свой чат
           const text = msg.text.trim();
           if (/^\/status(@\w+)?\b/i.test(text)) {
-            const state = await loadState();
-            await sendTelegram(cfgNow, buildDailyReport(cfgNow, state));
-            log(`📊 Статистика отправлена по команде /status (чат ${from}).`);
-          } else if (/^\/screenshots?(@\w+)?\b/i.test(text)) {
-            log(`📷 Запрошены скриншоты командой /screenshots (чат ${from}).`);
-            await sendAllScreenshots(cfgNow);
-            log(`📷 Скриншоты отправлены.`);
+            log(`📊 Запрошена статистика командой /status (чат ${from}).`);
+            await sendStatusWithScreenshots(cfgNow);
+            log(`📊 Статистика со скриншотами отправлена.`);
           }
         }
       }
@@ -733,7 +800,7 @@ async function daemon() {
   });
 
   scheduleDailyReport(); // ежедневная сводка в reportHourMsk:00 МСК (по умолчанию 18:00)
-  pollTelegramCommands(); // приём команд /status и /screenshots из чата
+  pollTelegramCommands(); // приём команды /status из чата
   await tick();
 }
 
