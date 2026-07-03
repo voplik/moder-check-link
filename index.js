@@ -83,7 +83,6 @@ async function loadConfig() {
   cfg.requestTimeoutMs = Number(cfg.requestTimeoutMs) || 30000;
   cfg.settleMs = Number(cfg.settleMs) || 30000;
   cfg.attempts = Number(cfg.attempts) || 2;
-  cfg.maxRedirects = Number(cfg.maxRedirects) || 10;
   if (!Array.isArray(cfg.links)) cfg.links = [];
   // Если в конфиге не задан userAgent, используем автоматический
   if (!cfg.userAgent) {

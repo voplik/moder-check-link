@@ -9,7 +9,6 @@
   "requestTimeoutMs": 60000,
   "settleMs": 60000,
   "attempts": 2,
-  "maxRedirects": 50,
   "alertOnRecovery": true,
   "links": [
     {
