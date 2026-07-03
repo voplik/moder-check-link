@@ -482,7 +482,7 @@ async function sendStatusWithScreenshots(cfg) {
     for (const link of links) {
       try {
         const r = await captureLinkScreenshot(link, cfg, browser);
-        if (r.ok && r.buf) media.push({ caption: tgLink(r.finalUrl, link.name), buf: r.buf });
+        if (r.ok && r.buf) media.push({ buf: r.buf }); // подпись только у первого (ниже)
       } catch (e) {
         log(`⚠️  Скриншот для «${link.name}» не удался: ${String(e.message).split('\n')[0]}`);
       }
@@ -495,7 +495,10 @@ async function sendStatusWithScreenshots(cfg) {
   const state = await loadState();
   const report = buildDailyReport(cfg, state);
 
-  // 4) одним сообщением: альбом + подпись-статистика на первом фото.
+  // 4) одним сообщением: альбом + подпись-статистика.
+  // Подпись ставим ТОЛЬКО на первое фото — тогда Telegram показывает её как
+  // текст сообщения под альбомом. Если подписать каждое фото, общий текст не
+  // выводится (виден лишь при открытии конкретного фото).
   // Если ни один скриншот не снялся — уходит хотя бы текст.
   if (media.length) {
     media[0].caption = report;
