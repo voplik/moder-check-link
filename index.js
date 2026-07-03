@@ -436,7 +436,14 @@ function buildDailyReport(cfg, state) {
 
   if (cfg.proxy) {
     const p = state['__proxy__'] || {};
-    lines.push('', `🌐 Прокси: ${p.down ? '❌ не работает' : '✅ работает'}`);
+    lines.push('');
+    if (p.down) {
+      lines.push(`🌐 Прокси: ❌ не работает`);
+      if (p.error) lines.push(`   ${escapeHtml(p.error)}`);
+    } else {
+      const geo = p.ip ? ` — ${escapeHtml(p.ip)} (${escapeHtml(p.country || '?')})` : '';
+      lines.push(`🌐 Прокси: ✅ работает${geo}`);
+    }
   }
 
   return lines.join('\n');
