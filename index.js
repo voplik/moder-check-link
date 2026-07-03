@@ -246,6 +246,40 @@ async function sendTelegramMediaGroup(cfg, items) {
   return false;
 }
 
+// Отправить текст и вернуть message_id (для последующего edit/delete). null при ошибке.
+async function sendTelegramReturningId(cfg, text) {
+  const { botToken, chatId } = cfg.telegram || {};
+  if (!botToken || botToken.startsWith('PASTE') || !chatId || String(chatId).startsWith('PASTE')) return null;
+  try {
+    const data = await tgApi(botToken, 'sendMessage', {
+      chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true,
+    });
+    return data.ok ? data.result.message_id : null;
+  } catch { return null; }
+}
+
+// Отредактировать текст ранее отправленного сообщения.
+async function editTelegramMessage(cfg, messageId, text) {
+  const { botToken, chatId } = cfg.telegram || {};
+  if (!botToken || !messageId) return false;
+  try {
+    const data = await tgApi(botToken, 'editMessageText', {
+      chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML', disable_web_page_preview: true,
+    });
+    return !!data.ok;
+  } catch { return false; }
+}
+
+// Удалить сообщение (например, «Загружаю данные» после отправки альбома).
+async function deleteTelegramMessage(cfg, messageId) {
+  const { botToken, chatId } = cfg.telegram || {};
+  if (!botToken || !messageId) return false;
+  try {
+    const data = await tgApi(botToken, 'deleteMessage', { chat_id: chatId, message_id: messageId });
+    return !!data.ok;
+  } catch { return false; }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Проверка одной ссылки: цепочка редиректов + поиск ключевого слова
 // ─────────────────────────────────────────────────────────────────────────────
@@ -471,8 +505,8 @@ async function sendAlertWithScreenshot(cfg, browser, link, text) {
 
 // /status: «загружаю» → скриншоты → статистика → один альбом с подписью.
 async function sendStatusWithScreenshots(cfg) {
-  // 1) сразу подтверждаем приём команды
-  await sendTelegram(cfg, '⏳ Загружаю данные…');
+  // 1) сразу подтверждаем приём команды (запоминаем id, чтобы потом убрать/заменить)
+  const loadingId = await sendTelegramReturningId(cfg, '⏳ Загружаю данные…');
 
   // 2) снимаем скриншоты конечных страниц
   const links = cfg.links || [];
@@ -495,17 +529,20 @@ async function sendStatusWithScreenshots(cfg) {
   const state = await loadState();
   const report = buildDailyReport(cfg, state);
 
-  // 4) одним сообщением: альбом + подпись-статистика.
-  // Подпись ставим ТОЛЬКО на первое фото — тогда Telegram показывает её как
-  // текст сообщения под альбомом. Если подписать каждое фото, общий текст не
-  // выводится (виден лишь при открытии конкретного фото).
-  // Если ни один скриншот не снялся — уходит хотя бы текст.
+  // 4) финал. Альбом нельзя «дорисовать» редактированием текста, поэтому:
+  //    • есть скриншоты → шлём альбом (подпись-статистика на первом фото) и
+  //      удаляем сообщение «Загружаю данные» — остаётся одно сообщение;
+  //    • скриншотов нет → просто редактируем «Загружаю данные» в текст статистики.
   if (media.length) {
-    media[0].caption = report;
-    await sendTelegramMediaGroup(cfg, media);
+    media[0].caption = report; // подпись только на первом фото — иначе Telegram
+                               // не покажет общий текст под альбомом
+    const ok = await sendTelegramMediaGroup(cfg, media);
+    if (ok && loadingId) await deleteTelegramMessage(cfg, loadingId);
+    else if (!ok && loadingId) await editTelegramMessage(cfg, loadingId, report); // альбом не ушёл — хотя бы текст
   } else {
-    log('⚠️  Ни один скриншот не снялся — отправлен только текст статистики.');
-    await sendTelegram(cfg, report);
+    log('⚠️  Ни один скриншот не снялся — статистика уходит текстом.');
+    if (loadingId) await editTelegramMessage(cfg, loadingId, report);
+    else await sendTelegram(cfg, report);
   }
 }
 
