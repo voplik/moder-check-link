@@ -19,13 +19,20 @@
 // Конфиг (ссылки, ключевые слова, интервал, токен, прокси) — в config.json.
 // Файл перечитывается на каждом цикле, поэтому правки применяются на лету.
 //
+// Управление конфигом из чата:
+//   /config — бот присылает текущий config.json (токен бота скрыт);
+//   сообщение с отметкой json — блок ```json … ``` или текст, начинающийся
+//   со слова «json», — валидируется и заменяет config.json. Изменения
+//   применяются сразу, без перезапуска. Если в присланном конфиге botToken
+//   скрыт (как в выдаче /config) — текущий токен сохраняется.
+//
 // Опции на уровне ссылки (в объекте links[]):
 //   keyword        — искомое слово на конечной странице
 //   checkKeyword   — false: не проверять ключевое слово (только доступ/статус)
 //   validStatuses  — массив допустимых HTTP-статусов, напр. [200, 403];
 //                    итоговый статус обязан входить в него, иначе — проблема
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, rename } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { chromium } from 'patchright'; // патченый Playwright — незаметен для анти-бот детекта
@@ -243,6 +250,48 @@ async function sendTelegramMediaGroup(cfg, items) {
     }
   }
   log(`⛔ Не удалось отправить альбом в Telegram за ${attempts} попыток.`);
+  return false;
+}
+
+// Отправка документа (файла) в Telegram. Используется для /config,
+// когда конфиг не влезает в лимит текстового сообщения (4096 символов).
+async function sendTelegramDocument(cfg, buffer, filename, caption) {
+  const { botToken, chatId } = cfg.telegram || {};
+  if (!botToken || botToken.startsWith('PASTE') || !chatId || String(chatId).startsWith('PASTE')) {
+    log('⚠️  Telegram не настроен — документ не отправлен.');
+    return false;
+  }
+  const url = `https://api.telegram.org/bot${botToken}/sendDocument`;
+  const attempts = TELEGRAM_RETRY_DELAYS.length + 1;
+
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const form = new FormData();
+      form.append('chat_id', String(chatId));
+      if (caption) {
+        form.append('caption', caption.slice(0, 1024));
+        form.append('parse_mode', 'HTML');
+      }
+      form.append('document', new Blob([buffer], { type: 'application/json' }), filename);
+
+      const res = await fetch(url, { method: 'POST', body: form, signal: AbortSignal.timeout(60_000) });
+      if (res.ok) return true;
+
+      const body = await res.text().catch(() => '');
+      const retriable = res.status === 429 || res.status >= 500;
+      log(`⚠️  Telegram sendDocument ${res.status}${retriable ? '' : ' (не повторяем)'}: ${body}`);
+      if (!retriable) return false;
+    } catch (e) {
+      log(`⚠️  Не удалось отправить документ (попытка ${i}/${attempts}): ${e.message}`);
+    }
+
+    if (i < attempts) {
+      const delay = TELEGRAM_RETRY_DELAYS[i - 1];
+      log(`↻ Повтор отправки документа через ${Math.round(delay / 1000)}с...`);
+      await sleep(delay);
+    }
+  }
+  log(`⛔ Не удалось отправить документ в Telegram за ${attempts} попыток.`);
   return false;
 }
 
@@ -741,7 +790,147 @@ function scheduleDailyReport() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Приём команд из чата: /status — статистика со скриншотами
+// Конфиг через чат: /config — показать текущий, сообщение с json — заменить
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Чем заменяем токен бота в выдаче /config. При приёме конфига с таким
+// значением (или любым, содержащим «***») текущий токен сохраняется —
+// т.е. выдачу /config можно поправить и прислать обратно как есть.
+const TOKEN_MASK = '***скрыто***';
+
+// /config: читаем файл с диска (как есть, без дефолтов из loadConfig),
+// маскируем токен и шлём текстом; если не влезает в лимит — файлом.
+async function sendCurrentConfig(cfg) {
+  let raw;
+  try {
+    raw = JSON.parse(await readFile(CONFIG_PATH, 'utf8'));
+  } catch (e) {
+    await sendTelegram(cfg, `⚠️ Не удалось прочитать config.json: ${escapeHtml(e.message)}`);
+    return;
+  }
+  if (raw.telegram?.botToken) raw.telegram.botToken = TOKEN_MASK;
+
+  const json = JSON.stringify(raw, null, 2);
+  const hint = 'Чтобы изменить — пришлите новый конфиг сообщением с отметкой json (блок ```json … ``` или текст, начинающийся со слова «json»). Секция telegram при этом не меняется.';
+  const asMessage = `⚙️ <b>Текущая конфигурация</b>\n<pre>${escapeHtml(json)}</pre>\n\n${escapeHtml(hint)}`;
+  if (asMessage.length <= 4000) {
+    await sendTelegram(cfg, asMessage);
+  } else {
+    await sendTelegramDocument(
+      cfg,
+      Buffer.from(json, 'utf8'),
+      'config.json',
+      `⚙️ Текущая конфигурация (токен скрыт). ${escapeHtml(hint)}`
+    );
+  }
+}
+
+// Достаёт JSON-конфиг из текстового сообщения, если оно помечено как json:
+//   • Telegram-разметка: entity type 'pre' с language 'json' (клиент убирает
+//     бэктики из текста, оставляя границы блока в entities);
+//   • сырой фенс ```json … ``` (если клиент не преобразовал разметку);
+//   • сообщение, начинающееся со слова «json», за которым идёт объект {…}.
+// Возвращает строку с JSON или null, если сообщение — не конфиг.
+function extractConfigJson(msg) {
+  const text = msg.text || '';
+  for (const e of msg.entities || []) {
+    if (e.type === 'pre' && String(e.language || '').toLowerCase() === 'json') {
+      return text.substr(e.offset, e.length);
+    }
+  }
+  let m = text.match(/^```json\s*([\s\S]*?)\s*(?:```)?$/i);
+  if (m) return m[1];
+  m = text.match(/^json\s+(\{[\s\S]+)$/i);
+  if (m) return m[1];
+  return null;
+}
+
+// Проверка загруженного конфига перед записью. Возвращает список ошибок.
+function validateConfigCandidate(cand) {
+  const errors = [];
+  if (!cand || typeof cand !== 'object' || Array.isArray(cand)) {
+    return ['корень файла должен быть JSON-объектом'];
+  }
+  if (cand.links != null && !Array.isArray(cand.links)) {
+    errors.push('поле "links" должно быть массивом');
+  }
+  for (const [i, link] of (Array.isArray(cand.links) ? cand.links : []).entries()) {
+    if (!link || typeof link !== 'object') {
+      errors.push(`links[${i}]: должен быть объектом`);
+      continue;
+    }
+    if (!link.name) errors.push(`links[${i}]: нет поля "name"`);
+    if (!link.url) {
+      errors.push(`links[${i}]: нет поля "url"`);
+    } else {
+      try { new URL(link.url); } catch { errors.push(`links[${i}]: некорректный url «${link.url}»`); }
+    }
+  }
+  if (cand.intervalMinutes != null && !(Number(cand.intervalMinutes) > 0)) {
+    errors.push('"intervalMinutes" должен быть положительным числом');
+  }
+  if (cand.proxy) {
+    try { new URL(cand.proxy); } catch { errors.push('"proxy" — некорректный URL'); }
+  }
+  return errors;
+}
+
+// Приём конфигурации сообщением из чата: валидируем и атомарно записываем.
+// Конфиг перечитывается на каждом цикле проверки и каждой итерации опроса
+// чата, поэтому изменения применяются сразу, без рестарта.
+async function handleConfigMessage(cfg, jsonText) {
+  const progressId = await sendTelegramReturningId(cfg, '⏳ Получил конфигурацию, проверяю…');
+  const fail = async (text) => {
+    log(`⚠️  Конфиг из чата отклонён: ${text.replace(/<[^>]+>/g, '')}`);
+    if (progressId) await editTelegramMessage(cfg, progressId, `❌ ${text}\n\nТекущая конфигурация не изменена.`);
+    else await sendTelegram(cfg, `❌ ${text}\n\nТекущая конфигурация не изменена.`);
+  };
+
+  let cand;
+  try {
+    cand = JSON.parse(jsonText);
+  } catch (e) {
+    return fail(`Сообщение не является корректным JSON: ${escapeHtml(String(e.message).split('\n')[0])}`);
+  }
+
+  const errors = validateConfigCandidate(cand);
+  if (errors.length) {
+    return fail(`Конфигурация не прошла проверку:\n• ${errors.map(escapeHtml).join('\n• ')}`);
+  }
+
+  // Секция telegram через чат не меняется никогда: всегда берём её из
+  // текущего файла. Иначе опечатка в токене/chatId оборвала бы связь с ботом.
+  let current = {};
+  try { current = JSON.parse(await readFile(CONFIG_PATH, 'utf8')); } catch {}
+  cand.telegram = current.telegram || {};
+
+  // Атомарная запись: сначала во временный файл, затем rename — демон никогда
+  // не увидит наполовину записанный config.json.
+  try {
+    const tmp = CONFIG_PATH + '.tmp';
+    await writeFile(tmp, JSON.stringify(cand, null, 2) + '\n');
+    await rename(tmp, CONFIG_PATH);
+  } catch (e) {
+    return fail(`Не удалось сохранить файл: ${escapeHtml(String(e.message).split('\n')[0])}`);
+  }
+
+  const links = Array.isArray(cand.links) ? cand.links : [];
+  const interval = Number(cand.intervalMinutes) || 60;
+  const summary =
+    `✅ <b>Конфигурация обновлена и применена</b>\n\n` +
+    `Ссылок: ${links.length}\n` +
+    `Интервал проверки: ${interval} мин\n` +
+    `Прокси: ${cand.proxy ? 'задан' : 'нет'}\n` +
+    `Настройки telegram сохранены без изменений.\n\n` +
+    `Перезапуск не требуется — новые настройки вступят в силу со следующего цикла.`;
+  log(`⚙️ Конфигурация обновлена через чат: ссылок ${links.length}, интервал ${interval} мин.`);
+  if (progressId) await editTelegramMessage(cfg, progressId, summary);
+  else await sendTelegram(cfg, summary);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Приём команд из чата: /status — статистика со скриншотами,
+// /config — текущая конфигурация, сообщение с отметкой json — замена конфига
 // (long polling через getUpdates; отвечаем только в настроенный chatId)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -777,7 +966,7 @@ async function pollTelegramCommands() {
     if (init.ok && init.result.length) offset = init.result[init.result.length - 1].update_id + 1;
   } catch {}
 
-  log('🤖 Слушаю команды в чате (/status).');
+  log('🤖 Слушаю команды в чате (/status, /config, конфиг сообщением с отметкой json).');
 
   const loop = async () => {
     let cfgNow;
@@ -799,10 +988,22 @@ async function pollTelegramCommands() {
           const from = String(msg.chat?.id || '');
           if (chatId && from !== chatId) continue; // отвечаем только в свой чат
           const text = msg.text.trim();
+
+          // Новая конфигурация сообщением с отметкой json
+          const configJson = extractConfigJson(msg);
+          if (configJson != null) {
+            log(`⚙️ Получена конфигурация сообщением (чат ${from}).`);
+            await handleConfigMessage(cfgNow, configJson);
+            continue;
+          }
+
           if (/^\/status(@\w+)?\b/i.test(text)) {
             log(`📊 Запрошена статистика командой /status (чат ${from}).`);
             await sendStatusWithScreenshots(cfgNow);
             log(`📊 Статистика со скриншотами отправлена.`);
+          } else if (/^\/config(@\w+)?\b/i.test(text)) {
+            log(`⚙️ Запрошена конфигурация командой /config (чат ${from}).`);
+            await sendCurrentConfig(cfgNow);
           }
         }
       }
@@ -848,7 +1049,7 @@ async function daemon() {
   });
 
   scheduleDailyReport(); // ежедневная сводка в reportHourMsk:00 МСК (по умолчанию 18:00)
-  pollTelegramCommands(); // приём команды /status из чата
+  pollTelegramCommands(); // приём команд /status, /config и конфига сообщением из чата
   await tick();
 }
 
