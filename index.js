@@ -107,6 +107,10 @@ async function saveState(state) {
 // Telegram
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Паузы (мс) между попытками отправки: от 3с до 60с. 5 попыток = 4 паузы.
+const TELEGRAM_RETRY_DELAYS = [3_000, 8_000, 20_000, 60_000];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function sendTelegram(cfg, text) {
   const { botToken, chatId } = cfg.telegram || {};
   if (!botToken || botToken.startsWith('PASTE') || !chatId || String(chatId).startsWith('PASTE')) {
@@ -114,26 +118,41 @@ async function sendTelegram(cfg, text) {
     return false;
   }
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      }),
-    });
-    if (!res.ok) {
-      log('⚠️  Telegram API вернул ошибку:', res.status, await res.text());
-      return false;
+  const attempts = TELEGRAM_RETRY_DELAYS.length + 1; // 5 попыток
+
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (res.ok) return true;
+
+      const body = await res.text().catch(() => '');
+      // 4xx (кроме 429) — постоянная ошибка (битый запрос/нет прав): не повторяем.
+      const retriable = res.status === 429 || res.status >= 500;
+      log(`⚠️  Telegram API ${res.status}${retriable ? '' : ' (не повторяем)'}: ${body}`);
+      if (!retriable) return false;
+    } catch (e) {
+      // сетевая ошибка/таймаут — повторяемо
+      log(`⚠️  Не удалось отправить в Telegram (попытка ${i}/${attempts}): ${e.message}`);
     }
-    return true;
-  } catch (e) {
-    log('⚠️  Не удалось отправить в Telegram:', e.message);
-    return false;
+
+    if (i < attempts) {
+      const delay = TELEGRAM_RETRY_DELAYS[i - 1];
+      log(`↻ Повтор отправки через ${Math.round(delay / 1000)}с...`);
+      await sleep(delay);
+    }
   }
+  log(`⛔ Не удалось отправить сообщение в Telegram за ${attempts} попыток.`);
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -316,8 +335,6 @@ async function runCycle(cfg, state) {
       '--disable-web-security', // может помочь, но осторожно
     ],
   });
-
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   try {
   // Пред-полётная проверка прокси (если задан)
