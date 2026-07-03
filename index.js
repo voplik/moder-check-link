@@ -12,7 +12,7 @@
 //
 // Раз в сутки (по умолчанию 18:00 МСК, настраивается reportHourMsk в config.json)
 // демон шлёт в Telegram сводку по каждой ссылке и прокси: статус + время
-// последней проверки.
+// последней проверки. Ту же сводку можно запросить в чате командой /stats.
 //
 // Конфиг (ссылки, ключевые слова, интервал, токен, прокси) — в config.json.
 // Файл перечитывается на каждом цикле, поэтому правки применяются на лету.
@@ -471,6 +471,80 @@ function scheduleDailyReport() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Приём команд из чата: /stats — прислать статистику по запросу
+// (long polling через getUpdates; отвечаем только в настроенный chatId)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function tgApi(botToken, method, params) {
+  const url = `https://api.telegram.org/bot${botToken}/${method}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(params || {}),
+    signal: AbortSignal.timeout(35_000),
+  });
+  return res.json();
+}
+
+async function pollTelegramCommands() {
+  let cfg;
+  try {
+    cfg = await loadConfig();
+  } catch {
+    setTimeout(pollTelegramCommands, 30_000);
+    return;
+  }
+  const { botToken } = cfg.telegram || {};
+  if (!botToken || botToken.startsWith('PASTE')) {
+    log('⚠️  Telegram не настроен — команда /stats недоступна.');
+    return;
+  }
+
+  // Пропускаем накопившийся бэклог, чтобы не отвечать на старые сообщения.
+  let offset = 0;
+  try {
+    const init = await tgApi(botToken, 'getUpdates', { offset: -1, timeout: 0 });
+    if (init.ok && init.result.length) offset = init.result[init.result.length - 1].update_id + 1;
+  } catch {}
+
+  log('🤖 Слушаю команды в чате (/stats).');
+
+  const loop = async () => {
+    let cfgNow;
+    try {
+      cfgNow = await loadConfig(); // перечитываем — chatId/токен могли поменяться
+    } catch {
+      setTimeout(loop, 5_000);
+      return;
+    }
+    const token = cfgNow.telegram?.botToken;
+    const chatId = String(cfgNow.telegram?.chatId || '');
+    try {
+      const data = await tgApi(token, 'getUpdates', { offset, timeout: 30 });
+      if (data.ok) {
+        for (const upd of data.result) {
+          offset = upd.update_id + 1;
+          const msg = upd.message || upd.channel_post;
+          if (!msg || !msg.text) continue;
+          const from = String(msg.chat?.id || '');
+          if (chatId && from !== chatId) continue; // отвечаем только в свой чат
+          if (/^\/stats(@\w+)?\b/i.test(msg.text.trim())) {
+            const state = await loadState();
+            await sendTelegram(cfgNow, buildDailyReport(cfgNow, state));
+            log(`📊 Статистика отправлена по команде /stats (чат ${from}).`);
+          }
+        }
+      }
+    } catch (e) {
+      log('⚠️  Ошибка опроса Telegram:', String(e.message).split('\n')[0]);
+      await new Promise((r) => setTimeout(r, 5_000));
+    }
+    setTimeout(loop, 500);
+  };
+  loop();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Планировщик (динамический интервал из конфига)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -503,6 +577,7 @@ async function daemon() {
   });
 
   scheduleDailyReport(); // ежедневная сводка в reportHourMsk:00 МСК (по умолчанию 18:00)
+  pollTelegramCommands(); // приём команды /stats из чата
   await tick();
 }
 
