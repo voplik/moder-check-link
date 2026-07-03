@@ -718,13 +718,8 @@ function buildDailyReport(cfg, state) {
   return lines.join('\n');
 }
 
-async function sendDailyReport(cfg, state) {
-  const ok = await sendTelegram(cfg, buildDailyReport(cfg, state));
-  log(ok ? '📊 Ежедневный отчёт отправлен.' : '⚠️  Не удалось отправить ежедневный отчёт.');
-  return ok;
-}
-
 // Самопланирующийся таймер: шлёт отчёт каждый день в reportHourMsk:00 по МСК.
+// Отчёт идентичен ответу на команду /status (статистика + скриншоты).
 function scheduleDailyReport() {
   const schedule = async () => {
     const cfgPeek = await loadConfig().catch(() => ({}));
@@ -734,8 +729,8 @@ function scheduleDailyReport() {
     setTimeout(async () => {
       try {
         const cfg = await loadConfig();
-        const state = await loadState();
-        await sendDailyReport(cfg, state);
+        await sendStatusWithScreenshots(cfg);
+        log('📊 Ежедневный отчёт (со скриншотами) отправлен.');
       } catch (e) {
         log('⚠️  Ошибка при отправке ежедневного отчёта:', e.message);
       }
@@ -894,9 +889,8 @@ if (arg === '--test-telegram') {
   }
 } else if (arg === '--report') {
   const cfg = await loadConfig();
-  const state = await loadState();
-  const ok = await sendDailyReport(cfg, state);
-  process.exit(ok ? 0 : 1);
+  await sendStatusWithScreenshots(cfg); // то же, что /status
+  process.exit(0);
 } else if (arg === '--once') {
   const cfg = await loadConfig();
   const state = await loadState();
