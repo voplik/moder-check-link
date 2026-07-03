@@ -22,9 +22,11 @@
 // Управление конфигом из чата:
 //   /config — бот присылает текущий config.json (токен бота скрыт);
 //   сообщение с отметкой json — блок ```json … ``` или текст, начинающийся
-//   со слова «json», — валидируется и заменяет config.json. Изменения
-//   применяются сразу, без перезапуска. Если в присланном конфиге botToken
-//   скрыт (как в выдаче /config) — текущий токен сохраняется.
+//   со слова «json», — обновляет config.json. Обновление частичное:
+//   достаточно прислать только изменяемые поля (хотя бы одно), остальные
+//   сохраняются. Изменения валидируются, применяются сразу, без перезапуска,
+//   и тут же запускается внеплановая проверка всех ссылок. Секция telegram
+//   через чат не изменяется — всегда сохраняется из текущего файла.
 //
 // Опции на уровне ссылки (в объекте links[]):
 //   keyword        — искомое слово на конечной странице
@@ -793,10 +795,13 @@ function scheduleDailyReport() {
 // Конфиг через чат: /config — показать текущий, сообщение с json — заменить
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Чем заменяем токен бота в выдаче /config. При приёме конфига с таким
-// значением (или любым, содержащим «***») текущий токен сохраняется —
-// т.е. выдачу /config можно поправить и прислать обратно как есть.
+// Чем заменяем токен бота в выдаче /config (только для показа: секция
+// telegram при обновлении через чат в любом случае не изменяется).
 const TOKEN_MASK = '***скрыто***';
+
+// Колбэк «конфиг применён» — демон регистрирует здесь немедленный запуск
+// цикла проверки, чтобы не ждать таймера. Вне демона (--once и т.п.) — null.
+let onConfigApplied = null;
 
 // /config: читаем файл с диска (как есть, без дефолтов из loadConfig),
 // маскируем токен и шлём текстом; если не влезает в лимит — файлом.
@@ -811,7 +816,7 @@ async function sendCurrentConfig(cfg) {
   if (raw.telegram?.botToken) raw.telegram.botToken = TOKEN_MASK;
 
   const json = JSON.stringify(raw, null, 2);
-  const hint = 'Чтобы изменить — пришлите новый конфиг сообщением с отметкой json (блок ```json … ``` или текст, начинающийся со слова «json»). Секция telegram при этом не меняется.';
+  const hint = 'Чтобы изменить — пришлите сообщение с отметкой json (блок ```json … ``` или текст, начинающийся со слова «json»). Достаточно только изменяемых полей, например json {"intervalMinutes": 30} — остальное сохранится. Секция telegram через чат не меняется.';
   const asMessage = `⚙️ <b>Текущая конфигурация</b>\n<pre>${escapeHtml(json)}</pre>\n\n${escapeHtml(hint)}`;
   if (asMessage.length <= 4000) {
     await sendTelegram(cfg, asMessage);
@@ -892,40 +897,64 @@ async function handleConfigMessage(cfg, jsonText) {
   } catch (e) {
     return fail(`Сообщение не является корректным JSON: ${escapeHtml(String(e.message).split('\n')[0])}`);
   }
-
-  const errors = validateConfigCandidate(cand);
-  if (errors.length) {
-    return fail(`Конфигурация не прошла проверку:\n• ${errors.map(escapeHtml).join('\n• ')}`);
+  if (!cand || typeof cand !== 'object' || Array.isArray(cand)) {
+    return fail('Корень сообщения должен быть JSON-объектом с полями конфигурации.');
   }
+
+  // Частичное обновление: достаточно прислать только изменяемые поля —
+  // остальные сохраняются из текущего config.json.
+  const updatedKeys = Object.keys(cand).filter((k) => k !== 'telegram');
+  if (!updatedKeys.length) {
+    return fail('В сообщении нет ни одного поля для обновления (секция telegram через чат не изменяется).');
+  }
+
+  let current = {};
+  try { current = JSON.parse(await readFile(CONFIG_PATH, 'utf8')); } catch {}
 
   // Секция telegram через чат не меняется никогда: всегда берём её из
   // текущего файла. Иначе опечатка в токене/chatId оборвала бы связь с ботом.
-  let current = {};
-  try { current = JSON.parse(await readFile(CONFIG_PATH, 'utf8')); } catch {}
-  cand.telegram = current.telegram || {};
+  const merged = { ...current, ...cand, telegram: current.telegram || {} };
+
+  // Валидируем итоговый конфиг целиком — присланный кусок в контексте текущего.
+  const errors = validateConfigCandidate(merged);
+  if (errors.length) {
+    return fail(`Конфигурация не прошла проверку:\n• ${errors.map(escapeHtml).join('\n• ')}`);
+  }
 
   // Атомарная запись: сначала во временный файл, затем rename — демон никогда
   // не увидит наполовину записанный config.json.
   try {
     const tmp = CONFIG_PATH + '.tmp';
-    await writeFile(tmp, JSON.stringify(cand, null, 2) + '\n');
+    await writeFile(tmp, JSON.stringify(merged, null, 2) + '\n');
     await rename(tmp, CONFIG_PATH);
   } catch (e) {
     return fail(`Не удалось сохранить файл: ${escapeHtml(String(e.message).split('\n')[0])}`);
   }
 
-  const links = Array.isArray(cand.links) ? cand.links : [];
-  const interval = Number(cand.intervalMinutes) || 60;
+  // Прежние значения изменённых полей — чтобы в чате осталась история
+  // и можно было откатиться, прислав этот же JSON обратно.
+  const before = {};
+  for (const k of updatedKeys) {
+    if (k in current) before[k] = current[k];
+  }
+  const missing = updatedKeys.filter((k) => !(k in current));
+  let beforeJson = JSON.stringify(before, null, 2);
+  if (beforeJson.length > 3000) beforeJson = beforeJson.slice(0, 3000) + '\n… (обрезано)';
+
   const summary =
-    `✅ <b>Конфигурация обновлена и применена</b>\n\n` +
-    `Ссылок: ${links.length}\n` +
-    `Интервал проверки: ${interval} мин\n` +
-    `Прокси: ${cand.proxy ? 'задан' : 'нет'}\n` +
-    `Настройки telegram сохранены без изменений.\n\n` +
-    `Перезапуск не требуется — новые настройки вступят в силу со следующего цикла.`;
-  log(`⚙️ Конфигурация обновлена через чат: ссылок ${links.length}, интервал ${interval} мин.`);
+    `✅ <b>Конфигурация обновлена</b>` +
+    (Object.keys(before).length
+      ? `\n\nБыло:\n<pre>${escapeHtml(beforeJson)}</pre>`
+      : '') +
+    (missing.length
+      ? `\n\nНовые поля: ${missing.map(escapeHtml).join(', ')}`
+      : '');
+  log(`⚙️ Конфигурация обновлена через чат: ${updatedKeys.join(', ')}.`);
   if (progressId) await editTelegramMessage(cfg, progressId, summary);
   else await sendTelegram(cfg, summary);
+
+  // Не ждём таймера — сразу гоним цикл проверки по новому конфигу.
+  if (onConfigApplied) onConfigApplied();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1022,12 +1051,27 @@ async function pollTelegramCommands() {
 
 async function daemon() {
   let timer = null;
+  let running = false;       // цикл проверки уже выполняется
+  let rerunRequested = false; // конфиг обновили посреди цикла — повторить сразу
+
   const tick = async () => {
+    // Не запускаем два цикла параллельно (два браузера, гонка за state.json):
+    // если проверка уже идёт — просто попросим повторить её по завершении.
+    if (running) {
+      rerunRequested = true;
+      return;
+    }
+    running = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
     let cfg;
     try {
       cfg = await loadConfig();
     } catch (e) {
       log('⚠️  Ошибка чтения config.json:', e.message);
+      running = false;
       timer = setTimeout(tick, 60_000);
       return;
     }
@@ -1037,9 +1081,22 @@ async function daemon() {
     } catch (e) {
       log('⚠️  Сбой цикла проверки:', e.message);
     }
+    running = false;
+    if (rerunRequested) {
+      rerunRequested = false;
+      log('⚙️ Конфигурация изменилась во время проверки — повторный прогон.');
+      tick();
+      return;
+    }
     const ms = cfg.intervalMinutes * 60_000;
     log(`Следующая проверка через ${cfg.intervalMinutes} мин.`);
     timer = setTimeout(tick, ms);
+  };
+
+  // Конфиг применён через чат → внеплановая проверка прямо сейчас.
+  onConfigApplied = () => {
+    log('⚙️ Конфигурация обновлена — запускаю внеплановую проверку.');
+    tick();
   };
 
   process.on('SIGINT', () => {
