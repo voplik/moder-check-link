@@ -469,15 +469,13 @@ async function sendAlertWithScreenshot(cfg, browser, link, text) {
   return sendTelegram(cfg, text); // фолбэк: сообщение уходит в любом случае
 }
 
-// /status: статистика + альбом скриншотов конечных страниц.
-// Текст статистики уходит всегда, даже если ни один скриншот не снялся.
+// /status: «загружаю» → скриншоты → статистика → один альбом с подписью.
 async function sendStatusWithScreenshots(cfg) {
-  const state = await loadState();
-  await sendTelegram(cfg, buildDailyReport(cfg, state)); // текст — всегда
+  // 1) сразу подтверждаем приём команды
+  await sendTelegram(cfg, '⏳ Загружаю данные…');
 
+  // 2) снимаем скриншоты конечных страниц
   const links = cfg.links || [];
-  if (!links.length) return;
-
   const browser = await launchBrowser(cfg);
   const media = [];
   try {
@@ -493,8 +491,19 @@ async function sendStatusWithScreenshots(cfg) {
     await browser.close().catch(() => {});
   }
 
-  if (media.length) await sendTelegramMediaGroup(cfg, media);
-  else log('⚠️  Ни один скриншот не снялся — отправлен только текст статистики.');
+  // 3) собираем статистику по ссылкам
+  const state = await loadState();
+  const report = buildDailyReport(cfg, state);
+
+  // 4) одним сообщением: альбом + подпись-статистика на первом фото.
+  // Если ни один скриншот не снялся — уходит хотя бы текст.
+  if (media.length) {
+    media[0].caption = report;
+    await sendTelegramMediaGroup(cfg, media);
+  } else {
+    log('⚠️  Ни один скриншот не снялся — отправлен только текст статистики.');
+    await sendTelegram(cfg, report);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
