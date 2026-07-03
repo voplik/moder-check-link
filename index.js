@@ -448,11 +448,8 @@ function buildDailyReport(cfg, state) {
 
   for (const link of cfg.links) {
     const s = state[link.name];
-    if (!s) {
-      lines.push(`⚪️ ${escapeHtml(link.name)}`);
-    } else {
-      lines.push(`${s.down ? '❌' : '✅'} ${escapeHtml(link.name)}`);
-    }
+    const name = tgLink(link.url, link.name); // название ведёт на URL ссылки
+    lines.push(`${!s ? '⚪️' : s.down ? '❌' : '✅'} ${name}`);
   }
 
   if (cfg.proxy) {
