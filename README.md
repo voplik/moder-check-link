@@ -59,8 +59,8 @@
 ## Запуск
 
 ```bash
-npm install                          # зависимости (playwright)
-npx playwright install chromium      # скачать браузер (один раз)
+npm install                          # зависимости (patchright)
+npx patchright install chromium      # скачать браузер (один раз)
 cp config.example.json config.json   # создать рабочий конфиг из шаблона
 #   → заполнить config.json: botToken, chatId, свои ссылки
 node index.js --test-telegram        # проверить, что бот пишет в чат
@@ -85,7 +85,7 @@ curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt install -y node
 mkdir -p /opt/check_link && cd /opt/check_link
 #   (скопировать сюда index.js, config.json, package.json)
 npm install
-npx playwright install --with-deps chromium   # браузер + системные библиотеки
+npx patchright install --with-deps chromium   # браузер + системные библиотеки
 
 # 3. Создать и заполнить конфиг (токен, chatId, реальные ссылки)
 cp config.example.json config.json && nano config.json

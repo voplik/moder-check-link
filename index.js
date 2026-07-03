@@ -28,7 +28,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { chromium } from 'playwright';
+import { chromium } from 'patchright'; // патченый Playwright — незаметен для анти-бот детекта
 import UserAgent from 'user-agents'; // Добавлено
 // Telegram шлём через встроенный в Node global fetch (прокси ему не нужен).
 

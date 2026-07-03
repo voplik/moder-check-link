@@ -11,7 +11,7 @@
     "test-telegram": "node index.js --test-telegram"
   },
   "dependencies": {
-    "playwright": "^1.47.0",
+    "patchright": "^1.61.1",
     "user-agents": "^2.1.109"
   },
   "keywords": [],
