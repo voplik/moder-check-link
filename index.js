@@ -12,7 +12,7 @@
 //
 // Раз в сутки (по умолчанию 18:00 МСК, настраивается reportHourMsk в config.json)
 // демон шлёт в Telegram сводку по каждой ссылке и прокси: статус + время
-// последней проверки. Ту же сводку можно запросить в чате командой /stats.
+// последней проверки. Ту же сводку можно запросить в чате командой /status.
 //
 // Конфиг (ссылки, ключевые слова, интервал, токен, прокси) — в config.json.
 // Файл перечитывается на каждом цикле, поэтому правки применяются на лету.
@@ -512,7 +512,7 @@ function scheduleDailyReport() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Приём команд из чата: /stats — прислать статистику по запросу
+// Приём команд из чата: /status — прислать статистику по запросу
 // (long polling через getUpdates; отвечаем только в настроенный chatId)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -537,7 +537,7 @@ async function pollTelegramCommands() {
   }
   const { botToken } = cfg.telegram || {};
   if (!botToken || botToken.startsWith('PASTE')) {
-    log('⚠️  Telegram не настроен — команда /stats недоступна.');
+    log('⚠️  Telegram не настроен — команда /status недоступна.');
     return;
   }
 
@@ -548,7 +548,7 @@ async function pollTelegramCommands() {
     if (init.ok && init.result.length) offset = init.result[init.result.length - 1].update_id + 1;
   } catch {}
 
-  log('🤖 Слушаю команды в чате (/stats).');
+  log('🤖 Слушаю команды в чате (/status).');
 
   const loop = async () => {
     let cfgNow;
@@ -569,10 +569,10 @@ async function pollTelegramCommands() {
           if (!msg || !msg.text) continue;
           const from = String(msg.chat?.id || '');
           if (chatId && from !== chatId) continue; // отвечаем только в свой чат
-          if (/^\/stats(@\w+)?\b/i.test(msg.text.trim())) {
+          if (/^\/status(@\w+)?\b/i.test(msg.text.trim())) {
             const state = await loadState();
             await sendTelegram(cfgNow, buildDailyReport(cfgNow, state));
-            log(`📊 Статистика отправлена по команде /stats (чат ${from}).`);
+            log(`📊 Статистика отправлена по команде /status (чат ${from}).`);
           }
         }
       }
@@ -618,7 +618,7 @@ async function daemon() {
   });
 
   scheduleDailyReport(); // ежедневная сводка в reportHourMsk:00 МСК (по умолчанию 18:00)
-  pollTelegramCommands(); // приём команды /stats из чата
+  pollTelegramCommands(); // приём команды /status из чата
   await tick();
 }
 
